@@ -1,0 +1,330 @@
+name: Bump Go module
+
+on:
+  workflow_call:
+    inputs:
+      module:
+        description: Go module path to update.
+        required: true
+        type: string
+      version:
+        description: Go module version tag, for example v0.68.2.
+        required: true
+        type: string
+      base-ref:
+        description: Base branch/ref to checkout and target with the pull request.
+        required: true
+        type: string
+      branch:
+        description: Rolling automation branch to push.
+        required: true
+        type: string
+      pr-title:
+        description: Pull request title.
+        required: true
+        type: string
+      commit-message:
+        description: Commit message. Defaults to the PR title.
+        required: false
+        type: string
+        default: ""
+      working-directory:
+        description: Directory containing go.mod.
+        required: false
+        type: string
+        default: "."
+      go-version-file:
+        description: Go version file path relative to the working directory.
+        required: false
+        type: string
+        default: "go.mod"
+      test-command:
+        description: Command run after go get/go mod tidy and before PR creation.
+        required: false
+        type: string
+        default: "go test ./..."
+      ci-workflow:
+        description: Optional workflow file to dispatch on the pushed branch and wait for before PR creation.
+        required: false
+        type: string
+        default: ""
+      ci-timeout-seconds:
+        description: Maximum time to wait for the dispatched CI workflow.
+        required: false
+        type: number
+        default: 1800
+      source-repository:
+        description: Repository that triggered the bump.
+        required: false
+        type: string
+        default: ""
+      source-release-url:
+        description: Release URL that triggered the bump.
+        required: false
+        type: string
+        default: ""
+      runner-control-plane-url:
+        description: Akua runner control plane URL.
+        required: false
+        type: string
+        default: https://runner-control-plane.robinbraemer.workers.dev
+      runner-oidc-audience:
+        description: OIDC audience for the Akua runner control plane.
+        required: false
+        type: string
+        default: akua-runner-control-plane
+    secrets:
+      RELEASE_CASCADE_APP_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  runner-plan:
+    uses: cnap-tech/actions/.github/workflows/runner-plan.yml@main
+    with:
+      control-plane-url: ${{ inputs.runner-control-plane-url }}
+      oidc-audience: ${{ inputs.runner-oidc-audience }}
+      jobs-json: '{"linux_x64":"linux-x64"}'
+
+  bump:
+    needs: runner-plan
+    runs-on: ${{ fromJSON(needs.runner-plan.outputs.linux_x64) }}
+    steps:
+      - name: Validate input
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${{ inputs.version }}" =~ ^v[0-9] ]]; then
+            echo "::error::Version must be a Go module tag, for example v0.68.2"
+            exit 1
+          fi
+
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.RELEASE_CASCADE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_CASCADE_APP_PRIVATE_KEY }}
+          permission-actions: write
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.base-ref }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          cache: true
+          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
+
+      - name: Configure Git
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+
+          APP_USER_ID="$(gh api "/users/${APP_SLUG}[bot]" --jq '.id')"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+
+      - name: Update module
+        id: update
+        env:
+          MODULE: ${{ inputs.module }}
+          VERSION: ${{ inputs.version }}
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          TEST_COMMAND: ${{ inputs.test-command }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$WORKING_DIRECTORY"
+          go env -w GOTOOLCHAIN=local
+
+          CURRENT_VERSION="$(go list -m -f '{{ .Version }}' "${MODULE}")"
+          if [ "$CURRENT_VERSION" = "$VERSION" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "${MODULE} is already at ${VERSION}."
+            exit 0
+          fi
+
+          go list -m "${MODULE}@${VERSION}" >/dev/null
+          go get "${MODULE}@${VERSION}"
+          go mod tidy
+
+          if git diff --quiet -- go.mod go.sum; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No dependency changes needed."
+            exit 0
+          fi
+
+          bash -euo pipefail -c "$TEST_COMMAND"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Push branch and validate CI
+        id: branch
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ inputs.branch }}
+          CI_WORKFLOW: ${{ inputs.ci-workflow }}
+          CI_TIMEOUT_SECONDS: ${{ inputs.ci-timeout-seconds }}
+          COMMIT_MESSAGE: ${{ inputs.commit-message }}
+          PR_TITLE: ${{ inputs.pr-title }}
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MESSAGE="$COMMIT_MESSAGE"
+          if [ -z "$MESSAGE" ]; then
+            MESSAGE="$PR_TITLE"
+          fi
+
+          git checkout -B "$BRANCH"
+          git add "${WORKING_DIRECTORY%/}/go.mod" "${WORKING_DIRECTORY%/}/go.sum"
+          git commit -m "$MESSAGE"
+
+          REMOTE_SHA="$(git ls-remote --heads origin "$BRANCH" | awk '{print $1}')"
+          if [ -n "$REMOTE_SHA" ]; then
+            git push --force-with-lease="refs/heads/${BRANCH}:${REMOTE_SHA}" origin "HEAD:refs/heads/${BRANCH}"
+          else
+            git push origin "HEAD:refs/heads/${BRANCH}"
+          fi
+
+          HEAD_SHA="$(git rev-parse HEAD)"
+          echo "head-sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+
+          if [ -z "$CI_WORKFLOW" ]; then
+            echo "ci-url=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          gh workflow run "$CI_WORKFLOW" \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$BRANCH"
+
+          RUN_ID=""
+          for _ in $(seq 1 60); do
+            RUN_ID="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "$CI_WORKFLOW" \
+              --branch "$BRANCH" \
+              --event workflow_dispatch \
+              --json databaseId,headSha \
+              --jq "map(select(.headSha == \"${HEAD_SHA}\")) | .[0].databaseId // \"\"")"
+            if [ -n "$RUN_ID" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::Timed out waiting for dispatched ${CI_WORKFLOW} run to appear"
+            exit 1
+          fi
+
+          deadline=$((SECONDS + CI_TIMEOUT_SECONDS))
+          STATUS=""
+          CONCLUSION=""
+          RUN_URL=""
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            RUN_JSON="$(gh run view "$RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json status,conclusion,url)"
+            STATUS="$(echo "$RUN_JSON" | jq -r '.status')"
+            CONCLUSION="$(echo "$RUN_JSON" | jq -r '.conclusion // ""')"
+            RUN_URL="$(echo "$RUN_JSON" | jq -r '.url')"
+            if [ "$STATUS" = "completed" ]; then
+              break
+            fi
+            sleep 10
+          done
+
+          if [ "$STATUS" != "completed" ]; then
+            echo "::error::Timed out waiting for ${CI_WORKFLOW} run ${RUN_ID}"
+            exit 1
+          fi
+
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::${CI_WORKFLOW} run ${RUN_ID} concluded ${CONCLUSION}: ${RUN_URL}"
+            exit 1
+          fi
+
+          echo "ci-url=${RUN_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Create pull request
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          MODULE: ${{ inputs.module }}
+          VERSION: ${{ inputs.version }}
+          BRANCH: ${{ inputs.branch }}
+          BASE_REF: ${{ inputs.base-ref }}
+          PR_TITLE: ${{ inputs.pr-title }}
+          SOURCE_REPOSITORY: ${{ inputs.source-repository }}
+          SOURCE_RELEASE_URL: ${{ inputs.source-release-url }}
+          CI_URL: ${{ steps.branch.outputs.ci-url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BODY="Updates \`${MODULE}\` to \`${VERSION}\`."
+          if [ -n "${SOURCE_REPOSITORY}" ]; then
+            BODY="${BODY}
+
+          Triggered by release cascade from \`${SOURCE_REPOSITORY}\`."
+          fi
+          if [ -n "${CI_URL}" ]; then
+            BODY="${BODY}
+
+          Validated by workflow_dispatch run: ${CI_URL}"
+          fi
+          if [ -n "${SOURCE_RELEASE_URL}" ]; then
+            BODY="${BODY}
+
+          Source release: ${SOURCE_RELEASE_URL}"
+          fi
+
+          PR_NUMBER="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --head "$BRANCH" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -z "$PR_NUMBER" ]; then
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$BASE_REF" \
+              --head "$BRANCH" \
+              --title "$PR_TITLE" \
+              --body "$BODY"
+            PR_NUMBER="$(gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --head "$BRANCH" \
+              --state open \
+              --json number \
+              --jq '.[0].number')"
+          else
+            gh pr edit "$PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$PR_TITLE" \
+              --body "$BODY"
+          fi
+
+          if ! gh pr merge "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --squash \
+            --auto; then
+            echo "::warning::Created PR #${PR_NUMBER}, but auto-merge could not be enabled."
+          fi

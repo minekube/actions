@@ -1,0 +1,93 @@
+name: Dispatch workflow
+
+on:
+  workflow_call:
+    inputs:
+      target-owner:
+        description: Target repository owner.
+        required: false
+        type: string
+        default: minekube
+      target-repository:
+        description: Target repository name.
+        required: true
+        type: string
+      target-workflow:
+        description: Target workflow file name or ID.
+        required: true
+        type: string
+      target-ref:
+        description: Target ref to dispatch.
+        required: true
+        type: string
+      inputs-json:
+        description: JSON object passed as workflow_dispatch inputs.
+        required: false
+        type: string
+        default: "{}"
+      runner-control-plane-url:
+        description: Akua runner control plane URL.
+        required: false
+        type: string
+        default: https://runner-control-plane.robinbraemer.workers.dev
+      runner-oidc-audience:
+        description: OIDC audience for the Akua runner control plane.
+        required: false
+        type: string
+        default: akua-runner-control-plane
+    secrets:
+      RELEASE_CASCADE_APP_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  runner-plan:
+    uses: cnap-tech/actions/.github/workflows/runner-plan.yml@main
+    with:
+      control-plane-url: ${{ inputs.runner-control-plane-url }}
+      oidc-audience: ${{ inputs.runner-oidc-audience }}
+      jobs-json: '{"linux_x64":"linux-x64"}'
+
+  dispatch:
+    needs: runner-plan
+    runs-on: ${{ fromJSON(needs.runner-plan.outputs.linux_x64) }}
+    steps:
+      - name: Validate dispatch inputs
+        env:
+          INPUTS_JSON: ${{ inputs.inputs-json }}
+        run: |
+          set -euo pipefail
+          jq -e 'type == "object"' <<<"$INPUTS_JSON" >/dev/null
+
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.RELEASE_CASCADE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_CASCADE_APP_PRIVATE_KEY }}
+          owner: ${{ inputs.target-owner }}
+          repositories: ${{ inputs.target-repository }}
+          permission-actions: write
+
+      - name: Dispatch target workflow
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_OWNER: ${{ inputs.target-owner }}
+          TARGET_REPOSITORY: ${{ inputs.target-repository }}
+          TARGET_WORKFLOW: ${{ inputs.target-workflow }}
+          TARGET_REF: ${{ inputs.target-ref }}
+          INPUTS_JSON: ${{ inputs.inputs-json }}
+        run: |
+          set -euo pipefail
+
+          jq -n \
+            --arg ref "$TARGET_REF" \
+            --argjson inputs "$INPUTS_JSON" \
+            '{ref: $ref, inputs: $inputs}' |
+            gh api \
+              --method POST \
+              "repos/${TARGET_OWNER}/${TARGET_REPOSITORY}/actions/workflows/${TARGET_WORKFLOW}/dispatches" \
+              --input -

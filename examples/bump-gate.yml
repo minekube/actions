@@ -1,0 +1,33 @@
+name: Bump Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        type: string
+      source_repository:
+        required: false
+        type: string
+      source_release_url:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  bump:
+    uses: minekube/actions/.github/workflows/bump-go-module.yml@v1
+    with:
+      module: go.minekube.com/gate
+      version: ${{ inputs.version }}
+      base-ref: main
+      branch: automation/update-gate
+      pr-title: "fix(deps): update Gate to ${{ inputs.version }}"
+      commit-message: "fix(deps): update gate to ${{ inputs.version }}"
+      ci-workflow: fly.yml
+      source-repository: ${{ inputs.source_repository }}
+      source-release-url: ${{ inputs.source_release_url }}
+    secrets: inherit

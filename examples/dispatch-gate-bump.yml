@@ -1,0 +1,28 @@
+name: Dispatch Gate bump
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  dispatch:
+    uses: minekube/actions/.github/workflows/dispatch-workflow.yml@v1
+    with:
+      target-repository: gate
+      target-workflow: bump-managed-dependency.yml
+      target-ref: master
+      inputs-json: |
+        {
+          "dependency": "vialite",
+          "version": "${{ inputs.version }}",
+          "source_repository": "${{ github.repository }}",
+          "source_release_url": "${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ inputs.version }}"
+        }
+    secrets: inherit
