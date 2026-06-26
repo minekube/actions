@@ -72,6 +72,48 @@ jobs:
           repositories: ${{ inputs.target-repository }}
           permission-actions: write
 
+      - name: Install GitHub CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if command -v gh >/dev/null 2>&1; then
+            gh --version
+            exit 0
+          fi
+
+          os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          case "$(uname -m)" in
+            x86_64) arch="amd64" ;;
+            aarch64|arm64) arch="arm64" ;;
+            *)
+              echo "::error::Unsupported architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+
+          version="$(
+            curl -fsSL https://api.github.com/repos/cli/cli/releases/latest |
+              sed -n 's/.*"tag_name": "v\([^"]*\)".*/\1/p' |
+              head -n 1
+          )"
+          if [ -z "$version" ]; then
+            echo "::error::Could not resolve latest GitHub CLI version"
+            exit 1
+          fi
+
+          tmp_dir="$(mktemp -d)"
+          curl -fsSL \
+            -o "${tmp_dir}/gh.tar.gz" \
+            "https://github.com/cli/cli/releases/download/v${version}/gh_${version}_${os}_${arch}.tar.gz"
+          tar -xzf "${tmp_dir}/gh.tar.gz" -C "$tmp_dir"
+
+          install_dir="${RUNNER_TEMP}/gh-bin"
+          mkdir -p "$install_dir"
+          cp "${tmp_dir}"/gh_*/bin/gh "${install_dir}/gh"
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "${install_dir}/gh" --version
+
       - name: Dispatch target workflow
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
