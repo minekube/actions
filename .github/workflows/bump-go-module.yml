@@ -94,11 +94,19 @@ jobs:
     runs-on: ${{ fromJSON(needs.runner-plan.outputs.linux_x64) }}
     steps:
       - name: Validate input
+        env:
+          MODULE: ${{ inputs.module }}
+          VERSION: ${{ inputs.version }}
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ ! "${{ inputs.version }}" =~ ^v[0-9] ]]; then
+          if [ -z "$MODULE" ]; then
+            echo "::error::Module input must not be empty"
+            exit 1
+          fi
+
+          if [[ ! "$VERSION" =~ ^v[0-9] ]]; then
             echo "::error::Version must be a Go module tag, for example v0.68.2"
             exit 1
           fi
