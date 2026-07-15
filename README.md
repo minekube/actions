@@ -48,7 +48,7 @@ jobs:
     secrets: inherit
 ```
 
-Both workflows use `cnap-tech/actions/.github/workflows/runner-plan.yml@main` to
+Both workflows use `akua-dev/actions/.github/workflows/runner-plan.yml@9d86a1802f2ebc29c7d5770a4ffff7bb84b6cdc0` to
 ask the Akua runner control plane for a self-hosted runner. Caller workflows must
 grant `id-token: write` so the runner-plan workflow can authenticate to the
 control plane with OIDC.
