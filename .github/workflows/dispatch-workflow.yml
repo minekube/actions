@@ -45,7 +45,7 @@ permissions:
 
 jobs:
   runner-plan:
-    uses: cnap-tech/actions/.github/workflows/runner-plan.yml@main
+    uses: akua-dev/actions/.github/workflows/runner-plan.yml@9d86a1802f2ebc29c7d5770a4ffff7bb84b6cdc0
     with:
       control-plane-url: ${{ inputs.runner-control-plane-url }}
       oidc-audience: ${{ inputs.runner-oidc-audience }}
