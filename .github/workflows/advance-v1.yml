@@ -2,7 +2,11 @@ name: Advance v1 channel
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, closed]
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+  pull_request_target:
+    types: [closed]
     branches:
       - main
 
@@ -12,7 +16,11 @@ permissions:
 jobs:
   validate:
     name: Validate v1 channel contract
-    if: github.event.action != 'closed' || github.event.pull_request.merged == true
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request_target' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -20,14 +28,14 @@ jobs:
       - name: Checkout exact event commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.merge_commit_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Verify exact checked-out SHA
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.merge_commit_sha || github.sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       - name: Run repository contracts
@@ -41,7 +49,7 @@ jobs:
     name: Advance v1 after reviewed merge
     needs: validate
     if: >-
-      github.event_name == 'pull_request' &&
+      github.event_name == 'pull_request_target' &&
       github.event.action == 'closed' &&
       github.event.pull_request.merged == true &&
       github.repository == 'minekube/actions' &&
@@ -70,8 +78,8 @@ jobs:
             const eventPull = context.payload.pull_request;
             const target = context.sha;
 
-            if (context.eventName !== "pull_request" || context.payload.action !== "closed") {
-              throw new Error("event must be pull_request.closed");
+            if (context.eventName !== "pull_request_target" || context.payload.action !== "closed") {
+              throw new Error("event must be pull_request_target.closed");
             }
             if (context.payload.repository?.full_name !== expectedRepository || `${context.repo.owner}/${context.repo.repo}` !== expectedRepository) {
               throw new Error(`repository must be ${expectedRepository}`);

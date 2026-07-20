@@ -67,16 +67,19 @@ Use the major tag `@v1` from callers. The repository advances that lightweight
 tag automatically after a reviewed pull request is merged into `main`; it is
 not a release or a patch/minor tag.
 
-`.github/workflows/advance-v1.yml` checks out the exact event SHA with no
-persisted credential and runs the contract tests with read-only permissions.
-Only the `closed` event for a pull request merged into this repository's `main`
-branch can start the no-checkout write job. That job re-fetches the exact pull
-request and requires its latest decisive review to approve the final head SHA
-from a collaborator with write or admin permission. It then requires the
-remote `v1` commit to be an ancestor of the merge SHA, rechecks the remote tag
-before writing only `refs/tags/v1`, and verifies the remote value afterward.
-The GitHub ref API uses `force: true` for an existing lightweight tag, but only
-after those event, pull-request, approval, contract-test, and ancestry checks.
+`.github/workflows/advance-v1.yml` validates pull requests by checking out the
+exact event SHA with no persisted credential and running the contract tests
+with read-only permissions. After a merge, a `pull_request_target.closed` run
+uses only the default-branch workflow, repeats read-only validation at the
+exact merge SHA, and then starts a no-checkout write job. This supports approved
+same-repository, fork, and Dependabot merges without executing their code with
+write credentials. The write job re-fetches the exact pull request and requires
+its latest decisive review to approve the final head SHA from a collaborator
+with write or admin permission. It then requires the remote `v1` commit to be
+an ancestor of the merge SHA, rechecks the remote tag before writing only
+`refs/tags/v1`, and verifies the remote value afterward. The GitHub ref API
+uses `force: true` for an existing lightweight tag, but only after those event,
+pull-request, approval, contract-test, and ancestry checks.
 
 Refusals before the update issue no tag write. If `v1` already matches the
 merge SHA, the job reports an already-current no-op and writes nothing. Once

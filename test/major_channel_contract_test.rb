@@ -1,9 +1,10 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "json"
 require "minitest/autorun"
+require "open3"
 require "yaml"
-require_relative "../lib/major_channel"
 
 class MajorChannelContractTest < Minitest::Test
   REPOSITORY = "minekube/actions"
@@ -11,310 +12,265 @@ class MajorChannelContractTest < Minitest::Test
   HEAD_SHA = "d" * 40
   PRIOR_SHA = "b" * 40
   DIVERGENT_SHA = "c" * 40
-  PULL_NUMBER = "42"
+  PULL_NUMBER = 42
 
-  FakeGit = Struct.new(:head, :fetched_tag, :ancestries, keyword_init: true) do
-    attr_reader :fetches
+  def test_deployed_script_advances_after_all_guards_pass
+    result = run_deployed_script
 
-    def head_sha
-      head
-    end
-
-    def fetch_tag(tag)
-      (@fetches ||= []) << tag
-      fetched_tag
-    end
-
-    def ancestor?(from, to)
-      ancestries.fetch([from, to], false)
-    end
-  end
-
-  class FakeGitHub
-    attr_reader :updates
-
-    def initialize(refs:, pull_request:, reviews:, permissions:, update_error: nil)
-      @refs = refs.dup
-      @pull_request = pull_request
-      @reviews = reviews
-      @permissions = permissions
-      @update_error = update_error
-      @updates = []
-    end
-
-    def pull_request(_number)
-      @pull_request
-    end
-
-    def pull_request_reviews(_number)
-      @reviews
-    end
-
-    def collaborator_permission(login)
-      { "permission" => @permissions.fetch(login, "none") }
-    end
-
-    def tag_ref(_tag)
-      value = @refs.shift
-      raise MajorChannel::ApiError, "missing tag response" unless value
-
-      value
-    end
-
-    def update_tag(tag, sha, force:)
-      raise @update_error if @update_error
-
-      @updates << [tag, sha, force]
-    end
-  end
-
-  def test_advances_an_ancestor_tag_only_for_the_exact_approved_merge_event
-    git = git_with_ancestor
-    github = github_with_refs(PRIOR_SHA, PRIOR_SHA, SHA)
-
-    result = advance(git: git, github: github)
-
-    assert_equal :advanced, result
-    assert_equal ["v1"], git.fetches
-    assert_equal [["v1", SHA, true]], github.updates
-  end
-
-  def test_refuses_events_other_than_a_merged_pull_request_close
-    [
-      { event_name: "push", message: /pull_request/ },
-      { event_action: "synchronize", message: /closed/ },
-      { pull_request_merged: "false", message: /merged/ }
-    ].each do |override|
-      error = assert_raises(MajorChannel::SafetyError) do
-        advance(git: git_with_ancestor, github: github_with_refs(PRIOR_SHA), **override)
-      end
-
-      assert_match override.fetch(:message), error.message
-    end
-  end
-
-  def test_refuses_when_the_event_merge_sha_is_not_the_checked_out_sha
-    error = assert_raises(MajorChannel::SafetyError) do
-      advance(git: git_with_ancestor, github: github_with_refs(PRIOR_SHA), pull_request_merge_sha: PRIOR_SHA)
-    end
-
-    assert_match(/merge SHA/, error.message)
-  end
-
-  def test_refuses_when_the_refetched_pull_request_does_not_match_the_event
-    [
-      merged_pull_request.merge("merge_commit_sha" => PRIOR_SHA),
-      merged_pull_request.merge("head" => { "sha" => PRIOR_SHA }),
-      merged_pull_request.merge("base" => { "ref" => "trunk", "repo" => { "full_name" => REPOSITORY } })
-    ].each do |pull_request|
-      error = assert_raises(MajorChannel::SafetyError) do
-        advance(git: git_with_ancestor, github: github_with_refs(PRIOR_SHA, pull_request: pull_request))
-      end
-
-      assert_match(/merged pull request/, error.message)
-    end
-  end
-
-  def test_requires_a_current_approval_for_the_final_pull_request_head
-    stale = approved_review.merge("commit_id" => PRIOR_SHA)
-    superseded = approved_review.merge("id" => 10)
-    changes_requested = approved_review.merge("id" => 11, "state" => "CHANGES_REQUESTED")
-
-    [[], [stale], [superseded, changes_requested]].each do |reviews|
-      error = assert_raises(MajorChannel::SafetyError) do
-        advance(git: git_with_ancestor, github: github_with_refs(PRIOR_SHA, reviews: reviews))
-      end
-
-      assert_match(/current trusted approval/, error.message)
-    end
-  end
-
-  def test_requires_the_current_approver_to_have_write_permission
-    error = assert_raises(MajorChannel::SafetyError) do
-      github = github_with_refs(PRIOR_SHA, permissions: { "reviewer" => "read" })
-      advance(git: git_with_ancestor, github: github)
-    end
-
-    assert_match(/current trusted approval/, error.message)
-  end
-
-  def test_refuses_the_wrong_repository_or_ref
-    repository_error = assert_raises(MajorChannel::SafetyError) do
-      advance(git: git_with_ancestor, github: github_with_refs(PRIOR_SHA), repository: "fork/actions")
-    end
-    assert_match(/repository/, repository_error.message)
-
-    ref_error = assert_raises(MajorChannel::SafetyError) do
-      advance(git: git_with_ancestor, github: github_with_refs(PRIOR_SHA), ref: "refs/heads/feature")
-    end
-    assert_match(/ref/, ref_error.message)
-  end
-
-  def test_requires_main_as_the_default_branch_and_the_exact_checked_out_sha
-    [
-      { default_branch: "trunk", message: /default branch/ },
-      { checked_out_sha: PRIOR_SHA, message: /checked-out/ }
-    ].each do |override|
-      error = assert_raises(MajorChannel::SafetyError) do
-        advance(git: git_with_ancestor, github: github_with_refs(PRIOR_SHA), **override)
-      end
-
-      assert_match override.fetch(:message), error.message
-    end
-  end
-
-  def test_noops_without_a_write_when_v1_already_matches_the_merge_sha
-    github = github_with_refs(SHA)
-
-    assert_equal :already_current, advance(git: git_with_ancestor, github: github)
-    assert_empty github.updates
-  end
-
-  def test_refuses_backward_tag_movement
-    git = FakeGit.new(
-      head: SHA,
-      fetched_tag: PRIOR_SHA,
-      ancestries: {
-        [SHA, PRIOR_SHA] => true
+    assert_nil result.fetch("error")
+    assert_equal [
+      {
+        "owner" => "minekube",
+        "repo" => "actions",
+        "ref" => "tags/v1",
+        "sha" => SHA,
+        "force" => true
       }
-    )
-
-    error = assert_raises(MajorChannel::SafetyError) do
-      advance(git: git, github: github_with_refs(PRIOR_SHA))
-    end
-
-    assert_match(/backward/, error.message)
+    ], result.dig("calls", "updates")
+    assert_equal 2, result.dig("calls", "reviews").length
+    assert_equal 1, result.dig("calls", "comparisons").length
+    assert_includes result.fetch("notices"), "v1 advanced to #{SHA}"
   end
 
-  def test_refuses_divergent_tag_movement
-    git = FakeGit.new(head: SHA, fetched_tag: DIVERGENT_SHA, ancestries: {})
+  def test_deployed_script_refuses_invalid_event_contexts_without_writes
+    cases = [
+      ["pull_request event", /pull_request_target\.closed/, ->(scenario) { scenario.dig("context")["eventName"] = "pull_request" }],
+      ["opened action", /pull_request_target\.closed/, ->(scenario) { scenario.dig("context", "payload")["action"] = "opened" }],
+      ["payload repository", /repository must be/, ->(scenario) { scenario.dig("context", "payload", "repository")["full_name"] = "fork/actions" }],
+      ["context repository", /repository must be/, ->(scenario) { scenario.dig("context", "repo")["owner"] = "fork" }],
+      ["default branch ref", /ref and default branch/, ->(scenario) { scenario.dig("context")["ref"] = "refs/heads/feature" }],
+      ["default branch name", /ref and default branch/, ->(scenario) { scenario.dig("context", "payload", "repository")["default_branch"] = "trunk" }],
+      ["event SHA", /merged pull request and commit SHA/, ->(scenario) { scenario.dig("context")["sha"] = "invalid" }],
+      ["missing pull request", /merged pull request and commit SHA/, ->(scenario) { scenario.dig("context", "payload")["pull_request"] = nil }],
+      ["pull request state", /merged pull request and commit SHA/, ->(scenario) { scenario.dig("context", "payload", "pull_request")["state"] = "open" }],
+      ["merged state", /merged pull request and commit SHA/, ->(scenario) { scenario.dig("context", "payload", "pull_request")["merged"] = false }],
+      ["merge SHA", /merge SHA must match/, ->(scenario) { scenario.dig("context", "payload", "pull_request")["merge_commit_sha"] = PRIOR_SHA }],
+      ["final head SHA", /final head SHA/, ->(scenario) { scenario.dig("context", "payload", "pull_request", "head")["sha"] = "invalid" }],
+      ["base branch", /must target/, ->(scenario) { scenario.dig("context", "payload", "pull_request", "base")["ref"] = "trunk" }],
+      ["base repository", /must target/, ->(scenario) { scenario.dig("context", "payload", "pull_request", "base", "repo")["full_name"] = "fork/actions" }]
+    ]
 
-    error = assert_raises(MajorChannel::SafetyError) do
-      advance(git: git, github: github_with_refs(DIVERGENT_SHA))
+    cases.each do |name, message, mutate|
+      result = run_deployed_script(&mutate)
+      assert_match message, result.fetch("error"), name
+      assert_empty result.dig("calls", "updateAttempts"), name
     end
-
-    assert_match(/divergent/, error.message)
   end
 
-  def test_surfaces_an_api_failure_without_claiming_an_update
-    github = github_with_refs(PRIOR_SHA, PRIOR_SHA, update_error: MajorChannel::ApiError.new("403 forbidden"))
+  def test_deployed_script_refuses_refetched_pull_request_mismatches
+    cases = [
+      ["number", /no longer reports/, ->(scenario) { scenario.fetch("pull")["number"] = 43 }],
+      ["state", /no longer reports/, ->(scenario) { scenario.fetch("pull")["state"] = "open" }],
+      ["merged", /no longer reports/, ->(scenario) { scenario.fetch("pull")["merged"] = false }],
+      ["merged timestamp", /no longer reports/, ->(scenario) { scenario.fetch("pull")["merged_at"] = nil }],
+      ["merge SHA", /does not match/, ->(scenario) { scenario.fetch("pull")["merge_commit_sha"] = PRIOR_SHA }],
+      ["head SHA", /does not match/, ->(scenario) { scenario.dig("pull", "head")["sha"] = PRIOR_SHA }],
+      ["base branch", /does not target/, ->(scenario) { scenario.dig("pull", "base")["ref"] = "trunk" }],
+      ["base repository", /does not target/, ->(scenario) { scenario.dig("pull", "base", "repo")["full_name"] = "fork/actions" }]
+    ]
 
-    error = assert_raises(MajorChannel::ApiError) do
-      advance(git: git_with_ancestor, github: github)
+    cases.each do |name, message, mutate|
+      result = run_deployed_script(&mutate)
+      assert_match message, result.fetch("error"), name
+      assert_empty result.dig("calls", "updateAttempts"), name
     end
-
-    assert_match(/403 forbidden/, error.message)
   end
 
-  def test_reports_a_post_write_mismatch_after_the_update_was_issued
-    github = github_with_refs(PRIOR_SHA, PRIOR_SHA, DIVERGENT_SHA)
+  def test_deployed_script_requires_a_current_final_head_approval_from_a_trusted_reviewer
+    cases = [
+      ["missing", ->(scenario) { scenario["reviewSets"] = [[], []] }],
+      ["stale", ->(scenario) { scenario["reviewSets"].flatten.each { |review| review["commit_id"] = PRIOR_SHA } }],
+      ["superseded", lambda do |scenario|
+        scenario["reviewSets"] = 2.times.map do
+          [approved_review.merge("id" => 10), approved_review.merge("id" => 11, "state" => "CHANGES_REQUESTED")]
+        end
+      end],
+      ["dismissed", lambda do |scenario|
+        scenario["reviewSets"] = 2.times.map do
+          [approved_review.merge("id" => 10), approved_review.merge("id" => 11, "state" => "DISMISSED")]
+        end
+      end],
+      ["untrusted", ->(scenario) { scenario["permissions"]["reviewer"] = "read" }]
+    ]
 
-    error = assert_raises(MajorChannel::SafetyError) do
-      advance(git: git_with_ancestor, github: github)
+    cases.each do |name, mutate|
+      result = run_deployed_script(&mutate)
+      assert_match(/current trusted approval/, result.fetch("error"), name)
+      assert_empty result.dig("calls", "updateAttempts"), name
     end
-
-    assert_match(/post-write/, error.message)
-    assert_equal [["v1", SHA, true]], github.updates
   end
 
-  def test_workflow_binds_writes_to_the_closed_merge_event_and_pins_actions
-    workflow = YAML.safe_load(File.read(workflow_path), aliases: false)
+  def test_deployed_script_rechecks_approval_immediately_before_writing
+    result = run_deployed_script do |scenario|
+      scenario["reviewSets"] = [[approved_review], []]
+    end
+
+    assert_match(/current trusted approval/, result.fetch("error"))
+    assert_empty result.dig("calls", "updateAttempts")
+  end
+
+  def test_deployed_script_ignores_comments_after_an_admin_approval
+    result = run_deployed_script do |scenario|
+      reviews = [approved_review, approved_review.merge("id" => 2, "state" => "COMMENTED")]
+      scenario["reviewSets"] = [reviews, reviews]
+      scenario["permissions"]["reviewer"] = "admin"
+    end
+
+    assert_nil result.fetch("error")
+    assert_equal 1, result.dig("calls", "updates").length
+  end
+
+  def test_deployed_script_noops_when_v1_is_already_current
+    result = run_deployed_script do |scenario|
+      scenario["refs"] = [tag_ref(SHA)]
+    end
+
+    assert_nil result.fetch("error")
+    assert_empty result.dig("calls", "updateAttempts")
+    assert_empty result.dig("calls", "comparisons")
+    assert_includes result.fetch("notices"), "v1 already points to #{SHA}; no update needed"
+  end
+
+  def test_deployed_script_refuses_non_lightweight_tags
+    result = run_deployed_script do |scenario|
+      scenario["refs"] = [{ "object" => { "type" => "tag", "sha" => PRIOR_SHA } }]
+    end
+
+    assert_match(/lightweight commit tag/, result.fetch("error"))
+    assert_empty result.dig("calls", "updateAttempts")
+  end
+
+  def test_deployed_script_refuses_a_malformed_tag_commit_sha
+    result = run_deployed_script do |scenario|
+      scenario["refs"] = [{ "object" => { "type" => "commit", "sha" => "invalid" } }]
+    end
+
+    assert_match(/lightweight commit tag/, result.fetch("error"))
+    assert_empty result.dig("calls", "updateAttempts")
+  end
+
+  def test_deployed_script_refuses_backward_and_divergent_movements
+    %w[behind diverged].each do |status|
+      result = run_deployed_script do |scenario|
+        scenario["comparisonStatus"] = status
+      end
+
+      assert_match(/non-fast-forward/, result.fetch("error"), status)
+      assert_empty result.dig("calls", "updateAttempts"), status
+    end
+  end
+
+  def test_deployed_script_refuses_a_remote_tag_race
+    result = run_deployed_script do |scenario|
+      scenario["refs"] = [tag_ref(PRIOR_SHA), tag_ref(DIVERGENT_SHA)]
+    end
+
+    assert_match(/changed before update/, result.fetch("error"))
+    assert_empty result.dig("calls", "updateAttempts")
+  end
+
+  def test_deployed_script_surfaces_a_remote_read_failure_without_writing
+    result = run_deployed_script do |scenario|
+      scenario["getRefErrorAt"] = 0
+      scenario["getRefError"] = "502 unavailable"
+    end
+
+    assert_match(/502 unavailable/, result.fetch("error"))
+    assert_empty result.dig("calls", "updateAttempts")
+  end
+
+  def test_deployed_script_surfaces_an_update_api_failure_after_the_attempt
+    result = run_deployed_script do |scenario|
+      scenario["updateError"] = "403 forbidden"
+    end
+
+    assert_match(/403 forbidden/, result.fetch("error"))
+    assert_equal 1, result.dig("calls", "updateAttempts").length
+    assert_empty result.dig("calls", "updates")
+  end
+
+  def test_deployed_script_reports_a_post_write_mismatch_after_updating
+    result = run_deployed_script do |scenario|
+      scenario["refs"] = [tag_ref(PRIOR_SHA), tag_ref(PRIOR_SHA), tag_ref(DIVERGENT_SHA)]
+    end
+
+    assert_match(/post-write.*investigate remote state/, result.fetch("error"))
+    assert_equal 1, result.dig("calls", "updates").length
+  end
+
+  def test_workflow_separates_untrusted_validation_from_trusted_post_merge_writes
+    workflow = workflow_definition
     source = File.read(workflow_path)
+    validate_job = workflow.fetch("jobs").fetch("validate")
+    advance_job = workflow.fetch("jobs").fetch("advance")
+    checkout = validate_job.fetch("steps").find { |step| step["name"] == "Checkout exact event commit" }
 
-    assert_equal({ "contents" => "read" }, workflow.fetch("permissions"))
-    assert_includes source, "types: [opened, synchronize, reopened, closed]"
-    assert_includes source, "github.event.action == 'closed'"
-    assert_includes source, "github.event.pull_request.merged == true"
+    assert_includes source, "pull_request:\n    types: [opened, synchronize, reopened]"
+    assert_includes source, "pull_request_target:\n    types: [closed]"
+    assert_includes source, "github.event_name == 'pull_request_target'"
     assert_includes source, "github.event.pull_request.merge_commit_sha == github.sha"
-    assert_includes source, "github.event.repository.default_branch == 'main'"
-    assert_includes source, "cancel-in-progress: false"
+    assert_equal({ "contents" => "read" }, workflow.fetch("permissions"))
+    assert_equal({ "contents" => "read" }, validate_job.fetch("permissions"))
+    assert_equal false, checkout.fetch("with").fetch("persist-credentials")
+    assert_includes checkout.fetch("with").fetch("ref"), "github.event.pull_request.merge_commit_sha"
+    assert_equal({ "contents" => "write", "pull-requests" => "read" }, advance_job.fetch("permissions"))
+    assert_equal "validate", advance_job.fetch("needs")
+    assert_equal "major-channel-v1", advance_job.fetch("concurrency").fetch("group")
+    assert_equal false, advance_job.fetch("concurrency").fetch("cancel-in-progress")
+    assert_equal ["Advance the major channel"], advance_job.fetch("steps").map { |step| step["name"] }
+    refute advance_job.fetch("steps").any? { |step| step.key?("run") || step.fetch("uses", "").include?("checkout") }
     assert_includes source, "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
     assert_includes source, "actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b"
     refute_match(/workflow_dispatch|schedule|secrets:|\n  push:/, source)
-
-    advance_job = workflow.fetch("jobs").fetch("advance")
-    assert_equal({ "contents" => "write", "pull-requests" => "read" }, advance_job.fetch("permissions"))
-    assert_equal "major-channel-v1", advance_job.fetch("concurrency").fetch("group")
-  end
-
-  def test_workflow_keeps_repository_code_and_credentials_out_of_the_write_job
-    workflow = YAML.safe_load(File.read(workflow_path), aliases: false)
-    validate_steps = workflow.fetch("jobs").fetch("validate").fetch("steps")
-    checkout = validate_steps.find { |step| step["name"] == "Checkout exact event commit" }
-    advance_steps = workflow.fetch("jobs").fetch("advance").fetch("steps")
-
-    assert_equal false, checkout.fetch("with").fetch("persist-credentials")
-    assert_includes validate_steps.map { |step| step["name"] }, "Verify exact checked-out SHA"
-    assert_includes validate_steps.map { |step| step["name"] }, "Run repository contracts"
-    assert_equal ["Advance the major channel"], advance_steps.map { |step| step["name"] }
-    refute advance_steps.any? { |step| step.key?("run") || step.fetch("uses", "").include?("checkout") }
-  end
-
-  def test_workflow_requires_a_current_final_head_approval_from_a_trusted_reviewer
-    source = File.read(workflow_path)
-
-    assert_includes source, "pulls.listReviews"
-    assert_includes source, "review.commit_id !== finalHead"
-    assert_includes source, 'new Set(["admin", "write"])'
-    assert_includes source, "getCollaboratorPermissionLevel"
-    assert_includes source, "current trusted approval"
   end
 
   private
 
-  def workflow_path
-    File.expand_path("../.github/workflows/advance-v1.yml", __dir__)
+  def run_deployed_script
+    scenario = JSON.parse(JSON.generate(default_scenario))
+    yield scenario if block_given?
+    input = JSON.generate("script" => deployed_script, "scenario" => scenario)
+    output, error, status = Open3.capture3("node", harness_path, stdin_data: input)
+    assert status.success?, "script harness failed: #{error}"
+
+    JSON.parse(output)
   end
 
-  def advance(git:, github:, repository: REPOSITORY, ref: "refs/heads/main", event_name: "pull_request", event_action: "closed", default_branch: "main", pull_request_merged: "true", pull_request_merge_sha: SHA, pull_request_head_sha: HEAD_SHA, checked_out_sha: nil, **_ignored)
-    git.head = checked_out_sha if checked_out_sha
-    MajorChannel::Advance.new(
-      inputs: MajorChannel::Inputs.new(
-        event_name: event_name,
-        event_action: event_action,
-        repository: repository,
-        ref: ref,
-        sha: SHA,
-        default_branch: default_branch,
-        pull_number: PULL_NUMBER,
-        pull_request_merged: pull_request_merged,
-        pull_request_merge_sha: pull_request_merge_sha,
-        pull_request_head_sha: pull_request_head_sha,
-        pull_request_base_ref: "main"
-      ),
-      git: git,
-      github: github
-    ).call
-  end
-
-  def git_with_ancestor
-    FakeGit.new(
-      head: SHA,
-      fetched_tag: PRIOR_SHA,
-      ancestries: {
-        [PRIOR_SHA, SHA] => true
-      }
-    )
-  end
-
-  def github_with_refs(*refs, pull_request: merged_pull_request, reviews: [approved_review], permissions: { "reviewer" => "write" }, update_error: nil)
-    FakeGitHub.new(
-      refs: refs.map { |sha| { "object" => { "type" => "commit", "sha" => sha } } },
-      pull_request: pull_request,
-      reviews: reviews,
-      permissions: permissions,
-      update_error: update_error
-    )
+  def default_scenario
+    {
+      "context" => {
+        "eventName" => "pull_request_target",
+        "ref" => "refs/heads/main",
+        "sha" => SHA,
+        "repo" => { "owner" => "minekube", "repo" => "actions" },
+        "payload" => {
+          "action" => "closed",
+          "number" => PULL_NUMBER,
+          "repository" => { "full_name" => REPOSITORY, "default_branch" => "main" },
+          "pull_request" => merged_pull_request
+        }
+      },
+      "pull" => merged_pull_request,
+      "reviewSets" => [[approved_review], [approved_review]],
+      "permissions" => { "reviewer" => "write" },
+      "comparisonStatus" => "ahead",
+      "refs" => [tag_ref(PRIOR_SHA), tag_ref(PRIOR_SHA), tag_ref(SHA)],
+      "getRefErrorAt" => nil,
+      "getRefError" => nil,
+      "updateError" => nil
+    }
   end
 
   def merged_pull_request
     {
-      "number" => PULL_NUMBER.to_i,
+      "number" => PULL_NUMBER,
       "state" => "closed",
+      "merged" => true,
       "merged_at" => "2026-07-19T00:00:00Z",
       "merge_commit_sha" => SHA,
-      "head" => { "sha" => HEAD_SHA },
-      "base" => { "ref" => "main", "repo" => { "full_name" => REPOSITORY } }
+      "head" => { "sha" => HEAD_SHA, "repo" => { "full_name" => "contributor/actions" } },
+      "base" => { "ref" => "main", "repo" => { "full_name" => REPOSITORY } },
+      "user" => { "login" => "contributor" }
     }
   end
 
@@ -323,7 +279,29 @@ class MajorChannelContractTest < Minitest::Test
       "id" => 1,
       "state" => "APPROVED",
       "commit_id" => HEAD_SHA,
-      "user" => { "login" => "reviewer" }
+      "submitted_at" => "2026-07-19T00:00:00Z",
+      "user" => { "login" => "reviewer", "type" => "User" },
+      "author_association" => "MEMBER"
     }
+  end
+
+  def tag_ref(sha)
+    { "ref" => "refs/tags/v1", "object" => { "type" => "commit", "sha" => sha } }
+  end
+
+  def deployed_script
+    workflow_definition.fetch("jobs").fetch("advance").fetch("steps").first.fetch("with").fetch("script")
+  end
+
+  def workflow_definition
+    YAML.safe_load(File.read(workflow_path), aliases: false)
+  end
+
+  def workflow_path
+    File.expand_path("../.github/workflows/advance-v1.yml", __dir__)
+  end
+
+  def harness_path
+    File.expand_path("major_channel_script_harness.js", __dir__)
   end
 end
