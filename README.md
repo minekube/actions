@@ -74,8 +74,8 @@ uses only the default-branch workflow, repeats read-only validation at the
 exact merge SHA, and then starts a no-checkout write job. This supports approved
 same-repository, fork, and Dependabot merges without executing their code with
 write credentials. The write job re-fetches the exact pull request and requires
-its latest decisive review to approve the final head SHA from a collaborator
-with write or admin permission. It then requires the remote `v1` commit to be
+at least one collaborator with write or admin permission whose latest decisive
+review approves the final head SHA. It then requires the remote `v1` commit to be
 an ancestor of the merge SHA, rechecks the remote tag before writing only
 `refs/tags/v1`, and verifies the remote value afterward. The GitHub ref API
 uses `force: true` for an existing lightweight tag, but only after those event,
