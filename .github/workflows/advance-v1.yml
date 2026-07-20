@@ -2,7 +2,7 @@ name: Advance v1 channel
 
 on:
   pull_request:
-  push:
+    types: [opened, synchronize, reopened, closed]
     branches:
       - main
 
@@ -12,15 +12,23 @@ permissions:
 jobs:
   validate:
     name: Validate v1 channel contract
+    if: github.event.action != 'closed' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - name: Checkout
+      - name: Checkout exact event commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact checked-out SHA
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       - name: Run repository contracts
         shell: bash
@@ -33,10 +41,15 @@ jobs:
     name: Advance v1 after reviewed merge
     needs: validate
     if: >-
-      github.event_name == 'push' &&
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true &&
       github.repository == 'minekube/actions' &&
       github.ref == 'refs/heads/main' &&
-      github.event.repository.default_branch == 'main'
+      github.event.repository.default_branch == 'main' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.base.repo.full_name == 'minekube/actions' &&
+      github.event.pull_request.merge_commit_sha == github.sha
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -45,27 +58,114 @@ jobs:
       group: major-channel-v1
       cancel-in-progress: false
     steps:
-      - name: Checkout exact event commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Run repository contracts before tag update
-        shell: bash
-        run: |
-          set -euo pipefail
-          ruby test/runner_plan_contract_test.rb
-          ruby test/major_channel_contract_test.rb
-
       - name: Advance the major channel
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_REF: ${{ github.ref }}
-          GITHUB_SHA: ${{ github.sha }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: ruby script/advance_major_channel.rb
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const expectedRepository = "minekube/actions";
+            const expectedBranch = "main";
+            const tag = "v1";
+            const shaPattern = /^[0-9a-f]{40}$/;
+            const trustedPermissions = new Set(["admin", "write"]);
+            const eventPull = context.payload.pull_request;
+            const target = context.sha;
+
+            if (context.eventName !== "pull_request" || context.payload.action !== "closed") {
+              throw new Error("event must be pull_request.closed");
+            }
+            if (context.payload.repository?.full_name !== expectedRepository || `${context.repo.owner}/${context.repo.repo}` !== expectedRepository) {
+              throw new Error(`repository must be ${expectedRepository}`);
+            }
+            if (context.ref !== `refs/heads/${expectedBranch}` || context.payload.repository?.default_branch !== expectedBranch) {
+              throw new Error(`ref and default branch must be ${expectedBranch}`);
+            }
+            if (!shaPattern.test(target) || !eventPull || eventPull.state !== "closed" || eventPull.merged !== true) {
+              throw new Error("event must identify a merged pull request and commit SHA");
+            }
+            if (eventPull.merge_commit_sha !== target || !shaPattern.test(eventPull.head?.sha || "")) {
+              throw new Error("pull request merge SHA must match the event SHA and include a final head SHA");
+            }
+            if (eventPull.base?.ref !== expectedBranch || eventPull.base?.repo?.full_name !== expectedRepository) {
+              throw new Error(`pull request must target ${expectedRepository}:${expectedBranch}`);
+            }
+
+            const pullNumber = context.payload.number;
+            const finalHead = eventPull.head.sha;
+            const pull = await github.rest.pulls.get({ ...context.repo, pull_number: pullNumber });
+            if (pull.data.number !== pullNumber || pull.data.state !== "closed" || pull.data.merged !== true || !pull.data.merged_at) {
+              throw new Error("GitHub no longer reports the event pull request as merged");
+            }
+            if (pull.data.merge_commit_sha !== target || pull.data.head?.sha !== finalHead) {
+              throw new Error("refetched pull request does not match the event merge and final head SHAs");
+            }
+            if (pull.data.base?.ref !== expectedBranch || pull.data.base?.repo?.full_name !== expectedRepository) {
+              throw new Error("refetched pull request does not target the expected repository and branch");
+            }
+
+            async function requireCurrentApproval() {
+              const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                ...context.repo,
+                pull_number: pullNumber,
+                per_page: 100
+              });
+              const decisiveStates = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
+              const latestByReviewer = new Map();
+              for (const review of reviews) {
+                const login = review.user?.login;
+                if (!login || !decisiveStates.has(review.state)) continue;
+                const previous = latestByReviewer.get(login);
+                if (!previous || review.id > previous.id) latestByReviewer.set(login, review);
+              }
+
+              for (const [login, review] of latestByReviewer) {
+                if (review.state !== "APPROVED" || review.commit_id !== finalHead) continue;
+                const access = await github.rest.repos.getCollaboratorPermissionLevel({
+                  ...context.repo,
+                  username: login
+                });
+                if (trustedPermissions.has(access.data.permission)) return;
+              }
+              throw new Error("merged pull request lacks a current trusted approval for its final head");
+            }
+
+            function tagSha(reference) {
+              const object = reference.data.object;
+              if (object?.type !== "commit" || !shaPattern.test(object.sha || "")) {
+                throw new Error(`remote ${tag} must be a lightweight commit tag`);
+              }
+              return object.sha;
+            }
+
+            await requireCurrentApproval();
+            const initial = tagSha(await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` }));
+            if (initial === target) {
+              core.notice(`${tag} already points to ${target}; no update needed`);
+              return;
+            }
+
+            const comparison = await github.rest.repos.compareCommitsWithBasehead({
+              ...context.repo,
+              basehead: `${initial}...${target}`
+            });
+            if (comparison.data.status !== "ahead") {
+              throw new Error(`refusing non-fast-forward ${tag} movement`);
+            }
+
+            const rechecked = tagSha(await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` }));
+            if (rechecked !== initial) {
+              throw new Error(`remote ${tag} changed before update`);
+            }
+            await requireCurrentApproval();
+
+            await github.rest.git.updateRef({
+              ...context.repo,
+              ref: `tags/${tag}`,
+              sha: target,
+              force: true
+            });
+
+            const actual = tagSha(await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` }));
+            if (actual !== target) {
+              throw new Error(`remote ${tag} post-write value did not match ${target}; investigate remote state`);
+            }
+            core.notice(`${tag} advanced to ${target}`);

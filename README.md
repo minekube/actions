@@ -67,17 +67,21 @@ Use the major tag `@v1` from callers. The repository advances that lightweight
 tag automatically after a reviewed pull request is merged into `main`; it is
 not a release or a patch/minor tag.
 
-`.github/workflows/advance-v1.yml` runs the contract tests on pull requests
-with read-only permissions. After a `main` push, its write-capable job accepts
-only this repository's exact checked-out merge commit when GitHub associates it
-with a merged pull request targeting `main`. It reads the remote `v1`, requires
-that commit to be an ancestor of the target, and verifies the remote value
-after updating only `refs/tags/v1`. The GitHub ref API uses `force: true` for
-an existing lightweight tag, but the workflow permits it only after those
-event, pull-request, test, and ancestry checks.
+`.github/workflows/advance-v1.yml` checks out the exact event SHA with no
+persisted credential and runs the contract tests with read-only permissions.
+Only the `closed` event for a pull request merged into this repository's `main`
+branch can start the no-checkout write job. That job re-fetches the exact pull
+request and requires its latest decisive review to approve the final head SHA
+from a collaborator with write or admin permission. It then requires the
+remote `v1` commit to be an ancestor of the merge SHA, rechecks the remote tag
+before writing only `refs/tags/v1`, and verifies the remote value afterward.
+The GitHub ref API uses `force: true` for an existing lightweight tag, but only
+after those event, pull-request, approval, contract-test, and ancestry checks.
 
-The channel fails closed: direct pushes, missing PR association, non-fast-
-forward history, API errors, and post-write mismatches leave `v1` unchanged.
-Do not move `v1` manually to recover a failed run. Investigate the run and
-escalate any exceptional rollback need; normal recovery is a reviewed,
-compatible corrective merge to `main`, which the channel can advance forward.
+Refusals before the update issue no tag write. If `v1` already matches the
+merge SHA, the job reports an already-current no-op and writes nothing. Once
+the update request has been issued, an API failure or post-write mismatch is
+not proof that `v1` stayed unchanged; investigate the remote state. Do not move
+`v1` manually to recover a failed run. Escalate any exceptional rollback need;
+normal recovery is a reviewed, compatible corrective merge to `main`, which
+the channel can advance forward.
