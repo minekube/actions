@@ -4,6 +4,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 - Add durable project-specific notes here as they are discovered through real work.
 - Run `ruby test/runner_plan_contract_test.rb` to validate the reusable runner-plan dependency and its consumer call shape.
+- `v1` is advanced only by the reviewed-merge contract in `.github/workflows/advance-v1.yml`; run `ruby test/major_channel_contract_test.rb` when changing that channel or its safety checks.
 
 ## Maintaining this file
 

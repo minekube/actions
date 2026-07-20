@@ -61,5 +61,23 @@ Required caller configuration:
 - GitHub App installation on every repository that the reusable workflow needs
   to write to or dispatch into
 
-Use the major tag `@v1` from callers. Move the `v1` tag when changing the shared
-workflow implementation in a backward-compatible way.
+## Major channel
+
+Use the major tag `@v1` from callers. The repository advances that lightweight
+tag automatically after a reviewed pull request is merged into `main`; it is
+not a release or a patch/minor tag.
+
+`.github/workflows/advance-v1.yml` runs the contract tests on pull requests
+with read-only permissions. After a `main` push, its write-capable job accepts
+only this repository's exact checked-out merge commit when GitHub associates it
+with a merged pull request targeting `main`. It reads the remote `v1`, requires
+that commit to be an ancestor of the target, and verifies the remote value
+after updating only `refs/tags/v1`. The GitHub ref API uses `force: true` for
+an existing lightweight tag, but the workflow permits it only after those
+event, pull-request, test, and ancestry checks.
+
+The channel fails closed: direct pushes, missing PR association, non-fast-
+forward history, API errors, and post-write mismatches leave `v1` unchanged.
+Do not move `v1` manually to recover a failed run. Investigate the run and
+escalate any exceptional rollback need; normal recovery is a reviewed,
+compatible corrective merge to `main`, which the channel can advance forward.

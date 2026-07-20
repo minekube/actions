@@ -1,0 +1,71 @@
+name: Advance v1 channel
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate v1 channel contract
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Run repository contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby test/runner_plan_contract_test.rb
+          ruby test/major_channel_contract_test.rb
+
+  advance:
+    name: Advance v1 after reviewed merge
+    needs: validate
+    if: >-
+      github.event_name == 'push' &&
+      github.repository == 'minekube/actions' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.repository.default_branch == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    concurrency:
+      group: major-channel-v1
+      cancel-in-progress: false
+    steps:
+      - name: Checkout exact event commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Run repository contracts before tag update
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby test/runner_plan_contract_test.rb
+          ruby test/major_channel_contract_test.rb
+
+      - name: Advance the major channel
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: ruby script/advance_major_channel.rb
