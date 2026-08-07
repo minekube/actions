@@ -55,7 +55,7 @@ control plane with OIDC.
 
 Required caller configuration:
 
-- `vars.RELEASE_CASCADE_APP_ID`
+- `vars.RELEASE_CASCADE_APP_CLIENT_ID`
 - `secrets.RELEASE_CASCADE_APP_PRIVATE_KEY`
 - `secrets: inherit` on the calling job
 - GitHub App installation on every repository that the reusable workflow needs
