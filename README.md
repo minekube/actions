@@ -48,14 +48,18 @@ jobs:
     secrets: inherit
 ```
 
-Both workflows use `akua-dev/actions/.github/workflows/runner-plan.yml@9d86a1802f2ebc29c7d5770a4ffff7bb84b6cdc0` to
-ask the Akua runner control plane for a self-hosted runner. Caller workflows must
-grant `id-token: write` so the runner-plan workflow can authenticate to the
-control plane with OIDC.
+Both workflows run on direct GH-hosted runners (`ubuntu-24.04`). The Akua
+runner control plane (`runner-control-plane.robinbraemer.workers.dev`) was
+removed after it went down on 2026-08-17 and starved every release-cascade
+run; no Minekube workflow may depend on it. Caller workflows therefore do
+NOT need `id-token: write` for the control plane.
+
+The release-cascade GitHub App credential is an explicit `workflow_call`
+input by default, with a `vars.RELEASE_CASCADE_APP_CLIENT_ID` fallback for
+existing v1 callers:
 
 Required caller configuration:
 
-- `vars.RELEASE_CASCADE_APP_CLIENT_ID`
 - `secrets.RELEASE_CASCADE_APP_PRIVATE_KEY`
 - `secrets: inherit` on the calling job
 - GitHub App installation on every repository that the reusable workflow needs

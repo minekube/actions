@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Workflow contract
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
+      - name: Run release-cascade workflow contract test
+        run: ruby test/cascade_workflow_contract_test.rb
+
+      - name: Validate workflow YAML
+        run: |
+          set -euo pipefail
+          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -e "$f" ] || continue
+            ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV[0]), aliases: false)' "$f"
+            echo "ok: $f"
+          done

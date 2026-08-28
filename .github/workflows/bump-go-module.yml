@@ -63,35 +63,21 @@ on:
         required: false
         type: string
         default: ""
-      runner-control-plane-url:
-        description: Akua runner control plane URL.
+      release-cascade-app-client-id:
+        description: GitHub App client ID used for the cross-repository dispatch.
         required: false
         type: string
-        default: https://runner-control-plane.robinbraemer.workers.dev
-      runner-oidc-audience:
-        description: OIDC audience for the Akua runner control plane.
-        required: false
-        type: string
-        default: akua-runner-control-plane
+        default: ""
     secrets:
       RELEASE_CASCADE_APP_PRIVATE_KEY:
         required: true
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
-  runner-plan:
-    uses: akua-dev/actions/.github/workflows/runner-plan.yml@9d86a1802f2ebc29c7d5770a4ffff7bb84b6cdc0
-    with:
-      control-plane-url: ${{ inputs.runner-control-plane-url }}
-      oidc-audience: ${{ inputs.runner-oidc-audience }}
-      jobs-json: '{"linux_x64":"linux-x64"}'
-
   bump:
-    needs: runner-plan
-    runs-on: ${{ fromJSON(needs.runner-plan.outputs.linux_x64) }}
+    runs-on: ubuntu-24.04
     steps:
       - name: Validate input
         env:
@@ -115,7 +101,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ vars.RELEASE_CASCADE_APP_CLIENT_ID }}
+          client-id: ${{ inputs.release-cascade-app-client-id || vars.RELEASE_CASCADE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_CASCADE_APP_PRIVATE_KEY }}
           permission-actions: write
           permission-contents: write
