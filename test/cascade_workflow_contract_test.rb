@@ -16,6 +16,14 @@ def workflow(path)
   YAML.safe_load(File.read(path), aliases: false)
 end
 
+# Psych parses YAML 1.1 booleans, so a workflow's `on:` key arrives as
+# boolean true. GitHub Actions reads YAML 1.2, where `on` is a plain key.
+def workflow_call_inputs(path)
+  document = workflow(path)
+  on = document["on"] || document[true]
+  on.fetch("workflow_call").fetch("inputs")
+end
+
 errors = []
 
 # No workflow in this repository may route through the Akua runner control
@@ -47,7 +55,7 @@ CONSUMERS.each do |filename|
   assert(errors, consumer["runs-on"] == RUNNER_LABEL,
          "#{filename} consumer must run directly on GH-hosted #{RUNNER_LABEL}, not a runner-plan label")
 
-  call_inputs = workflow(path).fetch("on").fetch("workflow_call").fetch("inputs")
+  call_inputs = workflow_call_inputs(path)
   assert(errors, !call_inputs.key?("runner-control-plane-url"),
          "#{filename} still exposes the dead runner-control-plane-url input")
   assert(errors, !call_inputs.key?("runner-oidc-audience"),
